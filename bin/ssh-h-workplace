@@ -1,0 +1,168 @@
+#!/bin/sh -e
+##:
+#h: Usage: ssh-h-workplace [show|USER@HOST] ...
+#h:
+#h: Manage the "Employee Computer Fleet" and their shared working
+#h: directories.
+#h:
+#h: Configuration files and directories:
+#h:
+#h:   SSH_H_WORKPLACE       : ID SSH UNAME-S RTREE sudo|env ORG GROUP RDP|-
+#h:   SSH_H_WORKPLACE_REPOS : GROUP NAME PATH
+#h:   SSH_H_WORKPLACE_LTREE : The location of local repositories.
+#h:
+#h: Commands:
+#h:
+#h1:   show     Show configuration.
+#h1:   mkdir    Create directory.
+#h1:   mount    Mount directory.
+#h1:   umount   Umount directory.
+#h1:   link     Link LDIR/ORG in ~/workman
+#h1:   repos    List repositories for the user.
+#h1:   wtrees   Create worktrees.
+#h2:   rdp      Connect by RDP.
+#h:
+#h: Environment variables: SSH_H_WORKPLACE{,_REPOS,_LTREE}
+##:
+ssh_h_workplace() {
+    local ssh="$1" cmd ign ID= SSH= UNAME= LDIR= RDIR= SUDO= ORG= REPOS= RDP=
+    if test ! -n "${ssh}"; then
+        awk '{printf "%-10s %s\n", $1, $2}' "${SSH_H_WORKPLACE}"
+        return 0
+    elif test @"${ssh}" = @"show"; then
+        cat <<-EOF
+	SSH_H_WORKPLACE       : ${SSH_H_WORKPLACE}
+	SSH_H_WORKPLACE_REPOS : ${SSH_H_WORKPLACE_REPOS}
+	SSH_H_WORKPLACE_LTREE : ${SSH_H_WORKPLACE_LTREE}
+	EOF
+        return 0
+    fi
+    if test ! -n "${SSH_H_WORKPLACE}"; then
+        echo >&2 'ssh-h-workplace: error: Please set $SSH_H_WORKPLACE.'
+        return 1
+    fi
+    read -r ID SSH UNAME LDIR SUDO ORG REPOS RDP ign <<-EOF
+	$(awk -v a="${ssh}" 'a == $1 || a == $2 { print }' "${SSH_H_WORKPLACE}")
+	EOF
+    if test ! -n "${RDP}"; then
+        echo >&2 "error: ${ssh}: Not found."
+        return 1
+    fi
+    if test @"${RDP}" = @"-"; then RDP=""; fi
+    
+    
+    case "${UNAME}" in
+        Windows_NT) RDIR="C:${LDIR}";;
+        *)          RDIR="${LDIR}";;
+    esac
+    if test @"${2}" = @""; then
+        echo "[SSH: ${SSH}][UNAME: ${UNAME}][LDIR: ${RDIR}]"
+        echo "[RDIR: ${RDIR}][SUDO: ${SUDO}][ORG: ${ORG}]"
+        echo "[REPOS: ${REPOS}]"
+        echo ""
+        sed -n 's/^ *#h1: */... /p' "$0"
+        test ! -n "${RDP}" || sed -n 's/^ *#h2: */... /p' "$0"
+        
+        return 0
+    fi
+    cmd="$2"
+    shift 2
+    case "${cmd}" in
+        mkdir)   ssh_h_workplace_mkdir  ;;
+        mount)   ssh_h_workplace_mount  ;;
+        umount)  ssh_h_workplace_umount ;;
+        link)    ssh_h_workplace_link   ;;
+        repos)   ssh_h_workplace_repos  ;;
+        wtrees)  ssh_h_workplace_wtrees ;;
+        rdp)     ssh_h_workplace_rdp    ;;
+        *)       echo >&2 "error: Invalid argument: ${cmd}"; return 1;;
+    esac
+}
+## -------------------------------------------------------------------
+ssh_h_workplace_mkdir() {
+    ssh "${SSH}" "
+        echo 'Creating ${RDIR} ...'
+        ${SUDO} mkdir -p '${RDIR}'
+        echo 'Creating ~/.projectdirs ...'
+        tee ~/.projectdirs <<-EOF
+	${RDIR}
+	EOF
+    "
+}
+ssh_h_workplace_mount() {
+    if test -e "${LDIR}/${ORG}"; then
+        echo "Already ${LDIR} mounted."
+    else
+        echo "Mounting ${SSH}:${RDIR} in ${LDIR} ..."
+        sudo mkdir -p "${LDIR}"
+        sudo ssh -o IdentityFile="${HOME}/.ssh/id_rsa" "${SSH}" "true"
+        sudo sshfs              \
+             "${SSH}":"${RDIR}" \
+             "${LDIR}"          \
+             -o IdentityFile="${HOME}/.ssh/id_rsa" \
+             -o allow_other     \
+             -o reconnect       \
+             -o delay_connect   \
+             -o dir_cache=no    \
+             -o max_conns=10    \
+             -o kernel_cache    \
+             -o uid="$(id -u)"  \
+             -o gid="$(id -g)"  \
+             -o auto_unmount
+        echo "Creating ${LDIR}/${ORG} directory ..."
+        mkdir -vp "${LDIR}/${ORG}"
+    fi
+}
+ssh_h_workplace_umount() {
+    sudo umount "${LDIR}"
+}
+ssh_h_workplace_link() {
+    rm -f ~/workman
+    ln -vs "${LDIR}/${ORG}" ~/workman
+}
+ssh_h_workplace_repos() {
+    if test ! -n "${SSH_H_WORKPLACE_LTREE}"; then
+        echo >&2 'ssh-h-workplace: error: Please set $SSH_H_WORKPLACE_LTREE.'
+        return 1
+    fi
+    if test ! -n "${SSH_H_WORKPLACE_REPOS}"; then
+        echo >&2 'ssh-h-workplace: error: Please set $SSH_H_WORKPLACE_REPOS.'
+        return 1
+    fi
+    
+    awk -v r="${REPOS}" \
+        -v rd="${LDIR}/${ORG}" \
+        -v ld="${SSH_H_WORKPLACE_LTREE}" \
+    '
+        r == $1 {printf "%s/%s %s/%s\n", rd, $2, ld, $3}
+    ' "${SSH_H_WORKPLACE_REPOS}"
+}
+ssh_h_workplace_wtrees() {
+    local dir url
+    ssh_h_workplace_repos | while read -r rdir ldir; do
+        if test ! -e "${rdir}"/.git; then
+            echo "Creating worktree ${rdir} ..."
+            git -C "${ldir}" worktree add -b "@${ID}" "${rdir}"
+        fi
+    done
+}
+ssh_h_workplace_rdp() {
+    case "${RDP}" in
+        '')    echo >&2 "ssh-h-workplace: error: Please set RDP column.";  return 1;;
+        *:*@*) true;;
+        *)     echo >&2 "ssh-h-workplace: error: ${RDP}: Invalid format."; return 1;;
+    esac
+    local user_pass="${RDP%%@*}"
+    local user="${user_pass%%:*}"
+    local pass="${user_pass##*:}"
+    local host="${RDP##*@}"
+    local password="$(pass "${pass}")"; test -n "${password}"
+    xfreerdp /timeout:60000 /v:"${host}" /f /multimon /u:"${user}" /p:"${password}"
+}
+## -------------------------------------------------------------------
+if test @"${SCRNAME:-$(basename "$0")}" = @"ssh-h-workplace"; then
+    case "${1}" in
+        -h|--help) sed -n 's/^ *#h[^:]*: \{0,1\}//p' "$0";;
+        *)         ssh_h_workplace "$@"; exit 0;;
+    esac
+fi
